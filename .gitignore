@@ -1,0 +1,11 @@
+# 参考书 PDF（29MB 二进制，不进版本库；需要时手动拷到另一台机器）
+*.pdf
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+.vscode/
+.idea/
+.obsidian/
