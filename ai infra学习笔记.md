@@ -128,21 +128,67 @@ lambda是匿名函数的简写，格式是lambda参数: 表达式，这里bad是
 
 yield是生成器函数，iterator是迭代器，生成器函数是编写迭代器的简介方式，**函数体内只要出现 `yield`，整个函数就变成生成器函数**——不管你调多少次，它都不会像普通函数那样直接跑完返回结果。
 
+10.**装饰器就是一个普通函数：接收一个可调用对象，返回另一个可调用对象。** `@` 只是语法糖。
+
+在调用边界附加行为
+
+```python
+from collections.abc import Callable
+from functools import wraps
+from time import perf_counter
+from typing import ParamSpec, TypeVar
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+def timed(fn: Callable[P, R]) -> Callable[P, R]:
+    @wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        start = perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            elapsed_ms = (perf_counter() - start) * 1_000
+            print(f"{fn.__name__}: {elapsed_ms:.3f} ms")
+    return wrapper
+
+@timed
+def preprocess(values: list[float]) -> list[float]:
+    return [value * 2 for value in values]
 
 
+##  @timed = 在函数调用前后加计时代码；@wraps(fn) = 保留原函数名和文档，让装饰后"看起来还是原函数"。
+##  @timed 等价于 preprocess = timed(preprocess)。functools.wraps 会保留函数名、文档字符串等属性，这对日志、测试和框架反射很重要。
+```
 
+11.上下文管理器
 
+```python
+from contextlib import contextmanager
+from collections.abc import Iterator
+from time import perf_counter
 
+@contextmanager
+def timer(name: str) -> Iterator[None]:
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (perf_counter() - start) * 1_000
+        print(f"{name}: {elapsed_ms:.3f} ms")
 
+with timer("load data"):
+    data = [value for value in range(100_000)]
 
+    
+## 如果只是单个调用点需要计时，一个普通的 with timer(): 往往更直白，不必为了“高级”而使用装饰器。
+```
 
+with语句是成对的准备收尾动作，收尾一定执行，所以 `with timer("load data"):` 的意思是：进入这个块时启动计时，离开块时打印耗时。
 
+@contextmanager装饰器相当于把一个“生成器函数”改造成上下文管理器，`yield` 之前的代码 = `__enter__` 里做的事；`yield` 本身 = 交出控制权，`with` 块在这里执行；`yield` 之后的代码 = `__exit__` 里做的事，`@contextmanager` 是把普通生成器函数变成 `with` 能用的工具。
 
-
-
-
-
-
+不是 `with` 需要"装饰器"，而是 `with` 需要对象有 `__enter__`/`__exit__`；文件、锁、数据库连接天生就有，而你的生成器没有，`@contextmanager` 就是帮你把这两条"缝隙"补上，让 `with` 能驱动它，所以「任何实现了 `__enter__` 和 `__exit__` 的对象 = 上下文管理器」，而 `@contextmanager` 只是帮你少写这两个方法的快捷方式。
 
 
 
