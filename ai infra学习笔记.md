@@ -29,7 +29,7 @@ nvidia-smi             # 驱动可见的 GPU 与进程
 nvcc --version         # CUDA Toolkit 中的编译器版本
 ```
 
-#### 2.3 python
+#### 2.3 python脚本到工程
 
 1.Python 变量更准确的说法是“**名字绑定到对象**”，写函数时自问一句：我这个函数是“改造了传进来的东西”，还是“做了个新东西返回出去”？这两者的语义完全不同，接口设计时要想清楚
 
@@ -189,6 +189,110 @@ with语句是成对的准备收尾动作，收尾一定执行，所以 `with tim
 @contextmanager装饰器相当于把一个“生成器函数”改造成上下文管理器，`yield` 之前的代码 = `__enter__` 里做的事；`yield` 本身 = 交出控制权，`with` 块在这里执行；`yield` 之后的代码 = `__exit__` 里做的事，`@contextmanager` 是把普通生成器函数变成 `with` 能用的工具。
 
 不是 `with` 需要"装饰器"，而是 `with` 需要对象有 `__enter__`/`__exit__`；文件、锁、数据库连接天生就有，而你的生成器没有，`@contextmanager` 就是帮你把这两条"缝隙"补上，让 `with` 能驱动它，所以「任何实现了 `__enter__` 和 `__exit__` 的对象 = 上下文管理器」，而 `@contextmanager` 只是帮你少写这两个方法的快捷方式。
+
+12.@dataclass是类装饰器，给类嵌入了三个特殊函数
+
+```python
+from dataclasses import dataclass
+from collections.abc import Sequence
+
+@dataclass(frozen=True)
+class ShardSpec:
+    rank: int
+    world_size: int
+
+def shard(values: Sequence[int], spec: ShardSpec) -> Sequence[int]:
+    return values[spec.rank::spec.world_size]
+
+
+# Sequence[int]	“给我任何能切片的整数序列”，我不改它
+# ShardSpec(frozen=True)	“这份 rank/world_size 的规格一旦定下就不会变”，可缓存可当 key
+# values[rank::world_size]	“从第 rank 个开始，每 world_size 个取一个” → 每个 worker 拿到自己那一份
+```
+
+#### 2.4 python并发与性能分析 
+
+1.并发并行
+
+**并发（concurrency）**：多个任务在同一时间段内推进；
+
+**并行（parallelism）**：多个任务在同一时刻真正执行。
+
+2.GIL是一个进程级别的互斥锁，CPython用来保护自己内部状态，同一进程中，通常只有一个线程能同时执行 Python 字节码，字节码是编译之后的给python虚拟机看的指令序列，CPython 是这门语言最主流的实现
+
+```
+进程（独立内存）
+├── 线程 A ──┐
+├── 线程 B ──┼──→ 抢同一把 GIL ──→ 同一时刻只有一个能执行字节码
+└── 线程 C ──┘
+```
+
+Python CPU 密集是说时间花在 CPython 虚拟机**逐条 dispatch 字节码**上。GIL 全程被占着 → 多线程 = 0 加速
+
+GIL并不是让多线程没用，脑子里需要知道，什么情况下线程会失效、什么情况下不会
+
+判断一个 Python 程序能不能靠多线程提速，只需要问一句：这段时间里，线程是在“跑 Python 字节码”，还是在“等”或者“跑 C 代码”？ 前者不能并行，后两者可以。
+
+3.多进程：绕开GIL，但是数据搬运有成本
+
+多进程的本质是花钱购买真正的并行能力： GIL 收的是“并行税”（同进程内线程没法同时跑 Python 代码），多进程免了这笔税；但每次跨进程都要付“搬运费”。 只有当“计算量 ≫ 搬运量”时，多进程才划算。
+
+多进程的主要成本包括：
+
+- 创建进程和独立解释器
+- 参数与返回值的序列化/反序列化；
+- 复制或映射内存
+- 进程间通信与同步
+
+`if __name__ == "__main__":` 对使用 `spawn` 启动子进程的平台尤其重要，可避免子进程重新导入模块时递归创建新进程，守卫，避免再次执行创建进程池
+
+4.asyncio：协作式I/O并发，用事件循环调度协程
+
+协程只在await处主动让出控制权，当任务在等待的时候，将线程给别的任务用，之前是一个线程做一个任务，任务等待的时候也占用了这个线程，当你使用了asyncio时，一个线程处理一万个任务，谁好了就处理谁，任务等待的时候去做别的任务
+
+```python
+import asyncio
+
+async def worker(name: str, delay: float) -> str:
+    await asyncio.sleep(delay)  # 模拟非阻塞 I/O
+    return name
+
+async def main() -> None:
+    results = await asyncio.gather(
+        worker("a", 0.2),
+        worker("b", 0.1),
+    )
+    print(results)
+
+asyncio.run(main())
+
+```
+
+什么是协程，`async def` 定义的函数。**调用它不会立刻执行**，只是返回一个待办事项对象，worker("a", 0.2)
+
+什么是事件循环，一个 `while` 循环 + 就绪队列 + 定时器堆。它不停问“谁准备好了”，把准备好的任务推进一小步，asyncio.run(main())创建的就是事件循环
+
+什么是await，唯一的让出点，我这里要等，让别人先跑， await asyncio.sleep(delay)
+
+理解：我们在调用async def函数时候（也就是协程），函数体压根不会执行，它只会返回一个协程对象，有三个路启动它
+
+await worker("a", 0.2)                          # ① 直接 await
+asyncio.create_task(worker("a", 0.2))           # ② 包成 Task
+asyncio.gather(worker("a", 0.2), ...)           # ③ 交给 gather（内部也是 ②）
+
+上面这段代码里，worker("a", 0.2)跑到await asyncio.sleep(delay)被挂起，worker("b", 0.1)跑到worker("b", 0.1)也被挂起
+
+![image-20261126215159383](./assets/image-20261126215159383.png)
+
+5.正确做基准测试
+
+
+
+
+
+
+
+
 
 
 
