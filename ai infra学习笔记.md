@@ -286,11 +286,87 @@ asyncio.gather(worker("a", 0.2), ...)           # ③ 交给 gather（内部也�
 
 5.正确做基准测试
 
+**性能数字只有在测量方法正确时才有意义**，别只测一次、别把初始化算进去、别在异步系统上用 CPU 计时器直接当执行时间——**先定义清楚你测的是什么，再让测量方式配得上这个定义**
+
+6.从慢定位到具体代码的顺序
+
+建议按由粗到细的顺序：
+
+1. **端到端计时**：确认回归真实存在；
+2. **阶段计时**：区分数据、计算、通信和保存；
+3. **函数级 profiling**：用 `cProfile` 找累计耗时高的函数；
+4. **行级/采样 profiling**：进一步定位热点行或原生调用栈；
+5. **内存 profiling**：用 `tracemalloc` 等工具找 Python 分配增长；
+6. **GPU profiling**：进入 PyTorch Profiler、Nsight Systems/Compute 等专用工具。
+
+7.python性能优化的优先级
+
+①先改算法复杂度和数据结构；
+
+②减少不必要的 I/O、复制和序列化；
+
+③把细粒度 Python 循环改成批处理/向量化原生算子；
+
+④减少 Python 与 C++/GPU 边界的频繁往返；
+
+⑤确认热点后，再写 C++、CUDA 或 Triton 扩展。
+
+#### 2.5 C/C++：内存、生命周期与资源管理
+
+1.值、地址、指针与引用
+
+```c++
+&表示引用，&value表示value的地址
+*表示指针，int* ptr表示指向int的指针
+int& ref = value，int&表示别名，ref就是value
+*ptr表示解引用指针
+指针可以为空，可以重定向
+    
+void consume(T value);          // 按值：函数获得自己的对象
+void update(T& value);          // 可变借用：函数会修改调用方对象
+void inspect(const T& value);   // 只读借用：避免复制
+void optional(T* value);        // 指针可能为空，通常不拥有对象
+
+```
+
+2.数组、指针与连续内存
+
+**原生数组在大多数表达式中会退化为首元素指针，长度信息丢失**（`sizeof(arr)` 在函数里只剩指针大小）
+
+```c++
+//老式C, 老式 C API（包括 CUDA）的签名几乎都是 指针 + 长度
+void scale(float* data, std::size_t size, float factor) {
+    for (std::size_t i = 0; i < size; ++i) {
+        data[i] *= factor;
+    }
+}
+
+//data[i] 等价于 *(data + i)：指针先往后跳 i × sizeof(float) 字节，再解引用；*= 是原地写入，改的就是调用方的内存
 
 
+//现代C
+#include <span>
 
+void scale(std::span<float> values, float factor) {
+    for (float& value : values) {
+        value *= factor;
+    }
+}
 
+//for (float value : values) 是按值拷贝，循环里改 value 不会影响原数组；必须是 float& 或 const float&，代码里value是别名，是引用，改动的话就会改动原数组的内容
+```
 
+`std::span` 不拥有数据，只是“指针 + 长度”的轻量视图。调用期间底层内存必须仍然有效。
+
+第一段是「指针 + 长度」的经典 C 风格：知道起点、必须自己带长度，灵活但容易出错；第二段用 `std::span` 把「指针 + 长度」打包成一个不拥有数据的视图，参数更少、更通用、更安全。**读别人代码时两种都会遇到，CUDA kernel 里至今主要还是第一种。**
+
+3.矩阵，内存是一维的，"二维矩阵"只是我们脑补出来的形状。矩阵在内存里实际是一行接一行平铺存储的（行主序，row-major，C/C++/NumPy/PyTorch 默认）
+
+![image-20261127003742559](./assets/image-20261127003742559.png)
+
+**`offset = row × N + col` 把二维坐标换算成一维内存地址**；记住两件事就够了：① CUDA 里只有扁平指针，必须手算它；② 按行连续访问快、跨列跳跃访问慢，这条规律贯穿缓存、合并访存和 tensor 布局。
+
+GEMM、卷积、Attention 的 kernel 里，全都在做 `row * N + col` 这类地址计算，以及更一般的形式 `row * ld + col`（`ld` = leading dimension，因为矩阵可能只是大矩阵里切出来的一块子矩阵）
 
 
 
