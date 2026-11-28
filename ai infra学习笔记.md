@@ -368,15 +368,110 @@ void scale(std::span<float> values, float factor) {
 
 GEMM、卷积、Attention 的 kernel 里，全都在做 `row * N + col` 这类地址计算，以及更一般的形式 `row * ld + col`（`ld` = leading dimension，因为矩阵可能只是大矩阵里切出来的一块子矩阵）
 
+4.RAII，资源获取就是初始化，在构造时获取资源，在析构时释放资源 
+
+```c++
+#include <cstdio>
+#include <stdexcept>
+
+class File {
+public:
+    explicit File(const char* path)
+        : handle_(std::fopen(path, "rb")) {
+        if (handle_ == nullptr) {
+            throw std::runtime_error("failed to open file");
+        }
+    }
+
+    ~File() {
+        std::fclose(handle_);
+    }
+
+    File(const File&) = delete;
+    File& operator=(const File&) = delete;
+
+private:
+    std::FILE* handle_;
+};
+
+//构造函数，类初始化的时候调用，析构函数，类生命周期结束的时候执行
+```
+
+实际项目中优先使用标准库已有的 RAII 类型，如 `std::vector`、`std::string`、`std::fstream`、`std::lock_guard` 和智能指针，不要重复造轮子。
+
+5.智能指针和所有权
+
+```c++
+auto unique = std::make_unique<Buffer>(1024);
+// 完全等价于：
+std::unique_ptr<Buffer> unique = std::make_unique<Buffer>(1024);
+
+//auto的作用是让编译器在编译期从初始化表达式推出类型，然后当成你手写了这个类型
+```
+
+C++中所有权必须显示表达出来，如果所有权没有共享需求，不要使用 `shared_ptr`。“避免思考所有权”不是共享所有权的合理理由。
+
+6.
+
+```c++
+std::vector<float> values(1'000'000, 0.0f);
+└──────┬──────┘  └──┬─┘ └───┬───┘ └─┬─┘
+     类型            变量名   参数1   参数2
+    
+
+std::vector<float> a(1'000'000, 0.0f);   // ✅ 100 万个元素，全是 0.0f
+std::vector<float> b{1'000'000, 0.0f};   // ⚠️ 只有 2 个元素：1000000.0f 和 0.0f
+
+#include <utility>
+#include <vector>
+
+std::vector<float> make_buffer() {
+    std::vector<float> values(1'000'000, 0.0f);
+    return values;  // 编译器通常消除复制，必要时可移动
+}
+
+auto a = make_buffer();
+auto b = std::move(a);  
+// a 仍有效，但内容处于未指定状态，移动：只搬 3 个指针，a 变成空（O(1)，快）
+// std::move 只是给 a 贴了一张“可以搬走”的标签，让编译器愿意调用移动构造而不是拷贝构造。
+/* 
+	b._M_start          = a._M_start          ← 把地址抄过来
+    b._M_finish         = a._M_finish
+    b._M_end_of_storage = a._M_end_of_storage
+    a._M_start          = nullptr             ← 让 a 忘掉这块内存
+    a._M_finish         = nullptr
+    a._M_end_of_storage = nullptr
+*/
 
 
 
+```
 
+如果类只由标准库 RAII 成员组成，通常无需手写析构、复制和移动操作，这就是 **Rule of Zero**。只有直接管理特殊资源时才需要自定义这些操作，并清晰定义所有权
 
+不要随手对返回值写 `std::move`；它可能阻止返回值优化。也不要在移动后假设源对象仍保留原内容。
 
+7. undefined behavior，UB
 
+```c++
+std::vector<int> values(4);
+values[4] = 1;  // 越界，未定义行为，指向了第五个元素，然后赋值为1
 
+//和java巨大的差异
+std::vector<int> a(4);          // size=4,  4 个元素，下标 0~3
+std::vector<int> b; b.reserve(4); // size=0,  一个元素都没有，容量 4
+//java 中 new ArrayList<>(4) 是“容量 4、元素 0 个”，reserve(n) 表示“先申请能放下 n 个元素的内存，但一个元素都还没创建
+```
 
+#### 2.6 C++编译、链接、模板与构建系统
 
+1.
 
+```c++
+源文件 .cpp
+  └─ 预处理：展开 #include、宏和条件编译
+      └─ 编译：语法/类型检查并生成汇编
+          └─ 汇编：生成目标文件 .o
+              └─ 链接：解析符号并生成可执行文件或库
+```
 
